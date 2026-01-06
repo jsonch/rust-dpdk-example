@@ -27,7 +27,6 @@ Start up a test veth interface:
 
 ```bash
 sudo ./veth-up.sh
-
 ```
 Run on the receiver end of the interface:
 ```bash
