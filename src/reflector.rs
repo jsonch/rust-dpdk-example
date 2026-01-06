@@ -13,7 +13,58 @@ const NUM_MBUFS: u32 = 4096;
 const MBUF_CACHE_SIZE: u32 = 250;
 const MAX_PKT_BURST: u16 = 32;
 
+/// parse command line args, get back port id
+fn parse_args() -> u16 {
+    // Collect command line arguments as CStrings
+    // We need to keep the CStrings alive for the duration of rte_eal_init
+    let args: Vec<CString> = std::env::args()
+        .map(|arg| CString::new(arg).unwrap())
+        .collect();
+
+    // Create a vector of raw pointers
+    let mut c_args: Vec<*mut c_char> = args
+        .iter()
+        .map(|arg| arg.as_ptr() as *mut c_char)
+        .collect();
+
+    // Add NULL terminator (some systems expect it)
+    c_args.push(ptr::null_mut());
+
+    let argc = (c_args.len() - 1) as c_int;  // Exclude NULL terminator from count
+    let argv = c_args.as_mut_ptr();
+
+    // Initialize DPDK EAL
+    // Note: rte_eal_init modifies argc and argv to consume EAL arguments
+    let ret = unsafe {rte_eal_init(argc, argv)};
+    if ret < 0 {
+        eprintln!("Error with EAL initialization");
+        std::process::exit(1);
+    }
+
+    // Calculate how many arguments remain after EAL consumed some
+    let remaining_argc = (argc - ret) as usize;
+
+    // Get the remaining arguments (application-specific args after --)
+    if remaining_argc != 2 {
+        println!("Usage: reflector [EAL options] -- <port_id>");
+        println!("Example: sudo ./reflector -l 0 --no-huge --no-pci --vdev 'net_pcap0,rx_pcap=test.pcap,tx_pcap=out.pcap' -- 0");
+        std::process::exit(1);
+    }
+
+    // Parse port_id from the remaining arguments
+    // argv now points to the remaining arguments after EAL processing
+    let remaining_argv = unsafe{std::slice::from_raw_parts(argv.offset(ret as isize), remaining_argc)};
+    let port_str = unsafe{std::ffi::CStr::from_ptr(remaining_argv[1]).to_str().unwrap()};
+    let port_id: u16 = port_str.parse().unwrap_or_else(|_| {
+        eprintln!("Invalid port number");
+        std::process::exit(1);
+    });
+    port_id
+    
+}
+
 /// Initialize a DPDK port with RX and TX queues
+/// Everything in here is unsafe
 unsafe fn port_init(port: u16) -> Result<(), i32> {
     // Check if port is valid
     if rte_eth_dev_is_valid_port(port) == 0 {
@@ -130,11 +181,11 @@ unsafe fn port_init(port: u16) -> Result<(), i32> {
     Ok(())
 }
 
-/// Main packet forwarding loop
-unsafe fn wire_ports(in_port: u16, out_port: u16) {
+
+/// Generic packet processing loop: receives packets on in_port and sends them out on out_port
+fn wire_ports(in_port: u16, out_port: u16) {
     let mut bufs: [*mut rte_mbuf; MAX_PKT_BURST as usize] = [ptr::null_mut(); MAX_PKT_BURST as usize];
     let mut total_forwarded: u64 = 0;
-    let mut total_dropped: u64 = 0;
 
     println!("Starting packet forwarding:");
     println!("  IN:  Port {}", in_port);
@@ -142,86 +193,40 @@ unsafe fn wire_ports(in_port: u16, out_port: u16) {
 
     loop {
         // Receive burst of packets
-        let nb_rx = rte_eth_rx_burst(in_port, 0, bufs.as_mut_ptr(), MAX_PKT_BURST);
+        let nb_rx = unsafe { rte_eth_rx_burst(in_port, 0, bufs.as_mut_ptr(), MAX_PKT_BURST) };
 
         if nb_rx > 0 {
             // Send burst to out_port
-            let nb_tx = rte_eth_tx_burst(out_port, 0, bufs.as_mut_ptr(), nb_rx);
+            let nb_tx = unsafe{ rte_eth_tx_burst(out_port, 0, bufs.as_mut_ptr(), nb_rx) };
 
             total_forwarded += nb_tx as u64;
             if nb_tx > 0 {
                 println!("Total forwarded packets: {}", total_forwarded);
-                println!("Total dropped packets: {}", total_dropped);
             }
 
-            // Free any packets that weren't sent
+            // Free unsent packets
             if nb_tx < nb_rx {
-                total_dropped += (nb_rx - nb_tx) as u64;
                 for i in nb_tx..nb_rx {
-                    rte_pktmbuf_free(bufs[i as usize]);
+                    unsafe{rte_pktmbuf_free(bufs[i as usize])};
                 }
             }
         }
     }
 }
 
+
+
 fn main() {
-    unsafe {
-        // Collect command line arguments as CStrings
-        // We need to keep the CStrings alive for the duration of rte_eal_init
-        let args: Vec<CString> = std::env::args()
-            .map(|arg| CString::new(arg).unwrap())
-            .collect();
 
-        // Create a vector of raw pointers
-        let mut c_args: Vec<*mut c_char> = args
-            .iter()
-            .map(|arg| arg.as_ptr() as *mut c_char)
-            .collect();
+    let port_id = parse_args();
 
-        // Add NULL terminator (some systems expect it)
-        c_args.push(ptr::null_mut());
-
-        let argc = (c_args.len() - 1) as c_int;  // Exclude NULL terminator from count
-        let argv = c_args.as_mut_ptr();
-
-        // Initialize DPDK EAL
-        // Note: rte_eal_init modifies argc and argv to consume EAL arguments
-        let ret = rte_eal_init(argc, argv);
-        if ret < 0 {
-            eprintln!("Error with EAL initialization");
-            std::process::exit(1);
-        }
-
-        // Calculate how many arguments remain after EAL consumed some
-        let remaining_argc = (argc - ret) as usize;
-
-        // Get the remaining arguments (application-specific args after --)
-        if remaining_argc != 2 {
-            println!("Usage: reflector [EAL options] -- <port_id>");
-            println!("Example: sudo ./reflector -l 0 --no-huge --no-pci --vdev 'net_pcap0,rx_pcap=test.pcap,tx_pcap=out.pcap' -- 0");
-            std::process::exit(1);
-        }
-
-        // Parse port_id from the remaining arguments
-        // argv now points to the remaining arguments after EAL processing
-        let remaining_argv = std::slice::from_raw_parts(argv.offset(ret as isize), remaining_argc);
-        let port_str = std::ffi::CStr::from_ptr(remaining_argv[1]).to_str().unwrap();
-        let port_id: u16 = port_str.parse().unwrap_or_else(|_| {
-            eprintln!("Invalid port number");
-            std::process::exit(1);
-        });
-
-        // Initialize the port
-        if let Err(e) = port_init(port_id) {
-            eprintln!("Cannot init port {}: error {}", port_id, e);
-            std::process::exit(1);
-        }
-
-        println!("Starting single-port loopback on port {}", port_id);
-        println!("Packets received on port {} will be sent back out port {}", port_id, port_id);
-
-        // Run loopback directly in main thread
-        wire_ports(port_id, port_id);
+    if let Err(e) = unsafe{port_init(port_id)} {
+        eprintln!("Cannot init port {}: error {}", port_id, e);
+        std::process::exit(1);
     }
+    println!("Starting single-port loopback on port {}", port_id);
+    println!("Packets received on port {} will be sent back out port {}", port_id, port_id);
+
+    wire_ports(port_id, port_id);
+
 }
