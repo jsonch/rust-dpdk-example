@@ -4,108 +4,69 @@
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
 use std::ptr;
-use std::alloc::{alloc, Layout};
-use std::mem::size_of;
 
 // Import DPDK bindings
 use dpdk_sys::*;
 
 const RING_SIZE: u16 = 2048;
-const NUM_MBUFS: u32 = 8192;
+const NUM_MBUFS: u32 = 4096;
 const MBUF_CACHE_SIZE: u32 = 250;
-const MAX_PKT_BURST: u16 = 4;
+const MAX_PKT_BURST: u16 = 32;
 
+/// Initialize a DPDK port with RX and TX queues
 unsafe fn port_init(port: u16) -> Result<(), i32> {
+    // Check if port is valid
     if rte_eth_dev_is_valid_port(port) == 0 {
         return Err(-1);
     }
 
-    // --- MANUAL MEMORY ALLOCATION START ---
+    // Create mbuf pool
     let pool_name = CString::new(format!("MBUF_POOL_{}", port)).unwrap();
-    
-    // CHANGE 1: Use 2048 byte elements.
-    // This allows 2 objects to fit perfectly in one 4KB page with NO padding.
-    // It creates a standard "2K" stride which AF_XDP loves.
-    // Usable data room will be: 2048 - 128 (mbuf) - 128 (headroom) = 1792 bytes.
-    // This is plenty for standard MTU (1500).
-    let elt_size = 2048; 
-    
-    // CHANGE 2: Calculate total memory (N * 2048)
-    let total_mem_size = (NUM_MBUFS as usize * elt_size) + 4096;
-
-    // 3. Keep Force 4KB (page) alignment for the Base Address
-    let layout = Layout::from_size_align(total_mem_size, 4096).unwrap();
-    let raw_mem = alloc(layout);
-
-    if raw_mem.is_null() {
-        eprintln!("Failed to allocate page-aligned memory");
-        return Err(-1);
-    }
-
-    // 4. Create an EMPTY mempool
-    let mbuf_pool = rte_mempool_create_empty(
+    let mbuf_pool = rte_pktmbuf_pool_create(
         pool_name.as_ptr(),
         NUM_MBUFS,
-        elt_size as u32,
         MBUF_CACHE_SIZE,
-        size_of::<rte_pktmbuf_pool_private>() as u32,
-        rte_socket_id() as i32,
         0,
+        RTE_MBUF_DEFAULT_BUF_SIZE as u16,
+        // 2048 + RTE_PKTMBUF_HEADROOM as u16,
+        rte_socket_id() as i32,
     );
 
     if mbuf_pool.is_null() {
-        eprintln!("Cannot create empty mempool");
+        eprintln!("Cannot create mbuf pool");
         return Err(-1);
     }
 
-    // 5. Set the handlers to Ring
-    let ring_ops = CString::new("ring_mp_mc").unwrap();
-    rte_mempool_set_ops_byname(mbuf_pool, ring_ops.as_ptr(), ptr::null_mut());
-
-    // 6. Populate the pool
-    // DPDK sees 2048 fits twice into 4096. It will pack them tightly.
-    let ret = rte_mempool_populate_virt(
-        mbuf_pool,
-        raw_mem as *mut _,
-        total_mem_size,
-        4096, 
-        None, 
-        ptr::null_mut(),
-    );
-
-    if ret < 0 {
-        eprintln!("Error populating mempool: {}", ret);
-        return Err(ret);
-    }
-
-    // 7. Initialize the mbuf headers
-    rte_pktmbuf_pool_init(mbuf_pool, ptr::null_mut());
-    rte_mempool_obj_iter(mbuf_pool, Some(rte_pktmbuf_init), ptr::null_mut());
-    // --- MANUAL MEMORY ALLOCATION END ---
-
-    // The rest is standard configuration...
+    // Initialize port configuration
     let port_conf: rte_eth_conf = std::mem::zeroed();
     let rx_rings: u16 = 1;
     let tx_rings: u16 = 1;
     let mut nb_rxd = RING_SIZE;
     let mut nb_txd = RING_SIZE;
 
+    // Get device info
     let mut dev_info: rte_eth_dev_info = std::mem::zeroed();
     let retval = rte_eth_dev_info_get(port, &mut dev_info);
     if retval != 0 {
+        eprintln!("Error getting device info for port {}: {}", port, retval);
         return Err(retval);
     }
 
+    // Configure the Ethernet device
     let retval = rte_eth_dev_configure(port, rx_rings, tx_rings, &port_conf);
     if retval != 0 {
+        eprintln!("Error configuring device: {}", retval);
         return Err(retval);
     }
 
+    // Adjust ring sizes
     let retval = rte_eth_dev_adjust_nb_rx_tx_desc(port, &mut nb_rxd, &mut nb_txd);
     if retval != 0 {
+        eprintln!("Error adjusting ring sizes: {}", retval);
         return Err(retval);
     }
 
+    // Set up RX queue
     let retval = rte_eth_rx_queue_setup(
         port,
         0,
@@ -119,6 +80,7 @@ unsafe fn port_init(port: u16) -> Result<(), i32> {
         return Err(retval);
     }
 
+    // Set up TX queue
     let mut txconf = dev_info.default_txconf;
     txconf.offloads = port_conf.txmode.offloads;
     let retval = rte_eth_tx_queue_setup(
@@ -129,27 +91,44 @@ unsafe fn port_init(port: u16) -> Result<(), i32> {
         &txconf,
     );
     if retval < 0 {
+        eprintln!("Error setting up TX queue: {}", retval);
         return Err(retval);
     }
 
+    // Start the Ethernet port
     let retval = rte_eth_dev_start(port);
     if retval < 0 {
+        eprintln!("Error starting device: {}", retval);
         return Err(retval);
     }
 
+    // Get and display MAC address
     let mut addr: rte_ether_addr = std::mem::zeroed();
-    rte_eth_macaddr_get(port, &mut addr);
-    
-    println!("Port {} MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        port, addr.addr_bytes[0], addr.addr_bytes[1], addr.addr_bytes[2],
-        addr.addr_bytes[3], addr.addr_bytes[4], addr.addr_bytes[5]);
+    let retval = rte_eth_macaddr_get(port, &mut addr);
+    if retval != 0 {
+        return Err(retval);
+    }
 
-    rte_eth_promiscuous_enable(port);
+    println!(
+        "Port {} MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        port,
+        addr.addr_bytes[0],
+        addr.addr_bytes[1],
+        addr.addr_bytes[2],
+        addr.addr_bytes[3],
+        addr.addr_bytes[4],
+        addr.addr_bytes[5]
+    );
+
+    // Enable promiscuous mode
+    let retval = rte_eth_promiscuous_enable(port);
+    if retval != 0 {
+        eprintln!("Error enabling promiscuous mode: {}", retval);
+        return Err(retval);
+    }
 
     Ok(())
 }
-
-
 
 /// Main packet forwarding loop
 unsafe fn wire_ports(in_port: u16, out_port: u16) {
