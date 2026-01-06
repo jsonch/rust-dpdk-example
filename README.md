@@ -30,7 +30,7 @@ sudo ./veth-up.sh
 ```
 Run on the receiver end of the interface:
 ```bash
-sudo target/release/reflector -l 0 --no-huge --no-pci   --vdev='net_af_xdp0,iface=receiver' -- 0
+sudo target/release/reflector -l 0 --no-huge --no-pci   --vdev='net_af_xdp0,iface=receiver,force_copy=1' -- 0
 ```
 
 Send the pcap on the sender end:
