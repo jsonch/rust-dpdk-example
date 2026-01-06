@@ -181,8 +181,8 @@ fn main() {
         // Add NULL terminator (some systems expect it)
         c_args.push(ptr::null_mut());
 
-        let mut argc = (c_args.len() - 1) as c_int;  // Exclude NULL terminator from count
-        let mut argv = c_args.as_mut_ptr();
+        let argc = (c_args.len() - 1) as c_int;  // Exclude NULL terminator from count
+        let argv = c_args.as_mut_ptr();
 
         // Initialize DPDK EAL
         // Note: rte_eal_init modifies argc and argv to consume EAL arguments
