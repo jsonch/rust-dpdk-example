@@ -21,9 +21,30 @@ cargo build --release
 sudo target/release/reflector -l 0 --no-huge --no-pci --vdev 'net_pcap0,rx_pcap=test.pcap,tx_pcap=out.pcap' -- 0
 ```
 
+## running with veth pairs and dpdk's af_xdp interface
+
+Start up a test veth interface:
+
+```bash
+sudo ./veth-up.sh
+
+```
+Run on the receiver end of the interface:
+```bash
+sudo target/release/reflector -l 0 --no-huge --no-pci   --vdev='net_af_xdp0,iface=receiver' -- 0
+```
+
+Send the pcap on the sender end:
+
+```bash
+sudo tcpreplay -i sender --pps=10 test.pcap
+```
+
+
+
 ## Project Structure
 
-- `src/main.rs` - Main reflector implementation
+- `src/reflector.rs` - Main reflector implementation
 - `Cargo.toml` - Rust project configuration
 
 This example demonstrates:

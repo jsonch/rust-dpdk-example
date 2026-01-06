@@ -8,8 +8,8 @@ use std::ptr;
 // Import DPDK bindings
 use dpdk_sys::*;
 
-const RING_SIZE: u16 = 1024;
-const NUM_MBUFS: u32 = 1024;
+const RING_SIZE: u16 = 2048;
+const NUM_MBUFS: u32 = 4096;
 const MBUF_CACHE_SIZE: u32 = 250;
 const MAX_PKT_BURST: u16 = 32;
 
@@ -28,6 +28,7 @@ unsafe fn port_init(port: u16) -> Result<(), i32> {
         MBUF_CACHE_SIZE,
         0,
         RTE_MBUF_DEFAULT_BUF_SIZE as u16,
+        // 2048 + RTE_PKTMBUF_HEADROOM as u16,
         rte_socket_id() as i32,
     );
 
