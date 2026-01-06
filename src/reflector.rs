@@ -27,8 +27,8 @@ unsafe fn port_init(port: u16) -> Result<(), i32> {
         NUM_MBUFS,
         MBUF_CACHE_SIZE,
         0,
-        RTE_MBUF_DEFAULT_BUF_SIZE as u16,
-        // 2048 + RTE_PKTMBUF_HEADROOM as u16,
+        // RTE_MBUF_DEFAULT_BUF_SIZE as u16,
+        2048 + RTE_PKTMBUF_HEADROOM as u16,
         rte_socket_id() as i32,
     );
 
