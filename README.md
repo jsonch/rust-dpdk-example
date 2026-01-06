@@ -13,7 +13,7 @@ Build and install the rust dpdk bindings using the `dpdk-install.sh` script from
 cargo build --release
 ```
 
-## Running with pcap files
+## Running with dpdk pcap IO
 
 ```bash
 # Create a test pcap file (you can use your own)
@@ -21,7 +21,7 @@ cargo build --release
 sudo target/release/reflector -l 0 --no-huge --no-pci --vdev 'net_pcap0,rx_pcap=test.pcap,tx_pcap=out.pcap' -- 0
 ```
 
-## running with veth pairs and dpdk's af_xdp interface
+## Running with veth pairs and dpdk af_xdp IO
 
 Start up a test veth interface:
 
